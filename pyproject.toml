@@ -1,10 +1,42 @@
 [project]
 name = "codecontexter"
 version = "0.1.0"
-description = "Add your description here"
+description = "Create enhanced Markdown summaries of code files with rich metadata"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "django-widget-tweaks>=1.5.0",
     "pathspec>=0.12.1",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+codecontexter = "codecontexter.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
