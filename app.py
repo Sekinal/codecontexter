@@ -1,595 +1,395 @@
 #!/usr/bin/env python3
+"""
+DeepContext: A production-grade codebase serializer for LLM Context Windows.
+Generates a structured Markdown summary of a directory with metadata, trees, and token estimates.
+"""
 
-import os
 import argparse
+import concurrent.futures
+import logging
+import os
 import pathlib
-import pathspec
 import sys
-import mimetypes
-import hashlib
-from typing import Iterator, Dict, Set, Optional, Tuple, List
-from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from collections import defaultdict
+from datetime import datetime
+from typing import Dict, List, Optional, Set, Generator
 
-# For better user experience
+# Try to import pathspec, handle absence gracefully
 try:
-    import tqdm
+    import pathspec
 except ImportError:
-    class tqdm:
-        def __init__(self, iterable=None, **kwargs):
-            self.iterable = iterable or []
-        def __iter__(self):
-            return iter(self.iterable)
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def update(self, n=1):
-            pass
-        def close(self):
-            pass
+    print("Error: 'pathspec' module is required. Install with: pip install pathspec", file=sys.stderr)
+    sys.exit(1)
 
-# --- Enhanced Configuration ---
+# -----------------------------------------------------------------------------
+# Configuration & Constants
+# -----------------------------------------------------------------------------
 
-LANGUAGE_MAP: Dict[str, Optional[str]] = {
-    # Python
-    '.py': 'python', '.pyi': 'python', '.pyx': 'python',
-    '.ipynb': 'json', 'pyproject.toml': 'toml', 'setup.py': 'python',
-    'requirements.txt': 'text', 'requirements-dev.txt': 'text',
-    'pipfile': 'toml', 'pipfile.lock': 'json', 'poetry.lock': 'toml',
-    'setup.cfg': 'ini', 'tox.ini': 'ini', 'pytest.ini': 'ini',
-    
-    # JavaScript/TypeScript/Node
-    '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
-    '.jsx': 'jsx', '.ts': 'typescript', '.tsx': 'tsx',
-    'package.json': 'json', 'package-lock.json': 'json',
-    'tsconfig.json': 'json', 'jsconfig.json': 'json',
-    '.eslintrc': 'json', '.eslintrc.json': 'json', '.eslintrc.js': 'javascript',
-    '.prettierrc': 'json', '.babelrc': 'json', 'babel.config.js': 'javascript',
-    'webpack.config.js': 'javascript', 'vite.config.js': 'javascript',
-    'vite.config.ts': 'typescript', 'next.config.js': 'javascript',
-    'nuxt.config.js': 'javascript', 'vue.config.js': 'javascript',
-    
-    # Web
-    '.html': 'html', '.htm': 'html', '.css': 'css', 
-    '.scss': 'scss', '.sass': 'sass', '.less': 'less',
-    '.vue': 'vue', '.svelte': 'svelte',
-    
-    # Java & JVM
-    '.java': 'java', '.kt': 'kotlin', '.kts': 'kotlin',
-    '.groovy': 'groovy', '.gradle': 'groovy', '.scala': 'scala',
-    'pom.xml': 'xml', 'build.gradle': 'groovy', 'build.gradle.kts': 'kotlin',
-    'settings.gradle': 'groovy', 'gradlew': 'bash',
-    'application.properties': 'properties', 'application.yml': 'yaml',
-    'application.yaml': 'yaml',
-    
-    # C-family
-    '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
-    '.cxx': 'cpp', '.hxx': 'cpp', '.cs': 'csharp',
-    '.m': 'objective-c', '.mm': 'objective-c',
-    'CMakeLists.txt': 'cmake', '.cmake': 'cmake',
-    
-    # Other Languages
-    '.go': 'go', 'go.mod': 'go', 'go.sum': 'text',
-    '.rs': 'rust', 'Cargo.toml': 'toml', 'Cargo.lock': 'toml',
-    '.rb': 'ruby', 'Gemfile': 'ruby', 'Gemfile.lock': 'text', 'Rakefile': 'ruby',
-    '.php': 'php', 'composer.json': 'json', 'composer.lock': 'json',
-    '.swift': 'swift', 'Package.swift': 'swift',
-    '.dart': 'dart', 'pubspec.yaml': 'yaml', 'pubspec.lock': 'yaml',
-    '.lua': 'lua', '.pl': 'perl', '.pm': 'perl',
-    '.r': 'r', '.R': 'r', '.jl': 'julia',
-    '.ex': 'elixir', '.exs': 'elixir', '.erl': 'erlang',
-    '.clj': 'clojure', '.cljs': 'clojure',
-    
-    # Shell & Scripts
-    '.sh': 'bash', '.bash': 'bash', '.zsh': 'zsh', '.fish': 'fish',
-    '.ps1': 'powershell', '.psm1': 'powershell',
-    '.bat': 'batch', '.cmd': 'batch',
-    
-    # Config & Data
-    '.json': 'json', '.json5': 'json', '.jsonc': 'json',
-    '.yaml': 'yaml', '.yml': 'yaml', 
-    '.xml': 'xml', '.toml': 'toml', '.ini': 'ini', 
-    '.cfg': 'ini', '.conf': 'ini', '.config': 'ini',
-    '.properties': 'properties',
-    
-    # Docker & Containers
-    'dockerfile': 'dockerfile', 'Dockerfile': 'dockerfile',
-    '.dockerfile': 'dockerfile', 'Dockerfile.dev': 'dockerfile',
-    'Dockerfile.prod': 'dockerfile', 'Dockerfile.test': 'dockerfile',
-    'docker-compose.yml': 'yaml', 'docker-compose.yaml': 'yaml',
-    'docker-compose.dev.yml': 'yaml', 'docker-compose.prod.yml': 'yaml',
-    'docker-compose.override.yml': 'yaml',
-    '.dockerignore': 'text', 'compose.yml': 'yaml', 'compose.yaml': 'yaml',
-    
-    # Kubernetes & Orchestration
-    'deployment.yaml': 'yaml', 'deployment.yml': 'yaml',
-    'service.yaml': 'yaml', 'service.yml': 'yaml',
-    'ingress.yaml': 'yaml', 'ingress.yml': 'yaml',
-    'configmap.yaml': 'yaml', 'configmap.yml': 'yaml',
-    'secret.yaml': 'yaml', 'secret.yml': 'yaml',
-    'kustomization.yaml': 'yaml', 'kustomization.yml': 'yaml',
-    'helmfile.yaml': 'yaml', 'Chart.yaml': 'yaml',
-    'values.yaml': 'yaml', 'values.yml': 'yaml',
-    
-    # Infrastructure as Code
-    '.tf': 'hcl', '.tfvars': 'hcl', '.hcl': 'hcl',
-    'terraform.tfvars': 'hcl', 'variables.tf': 'hcl',
-    'outputs.tf': 'hcl', 'main.tf': 'hcl',
-    'Vagrantfile': 'ruby',
-    
-    # CI/CD
-    '.gitlab-ci.yml': 'yaml', 'gitlab-ci.yml': 'yaml',
-    '.travis.yml': 'yaml', 'travis.yml': 'yaml',
-    'circle.yml': 'yaml', '.circleci': 'yaml',
-    'Jenkinsfile': 'groovy', 'jenkinsfile': 'groovy',
-    'azure-pipelines.yml': 'yaml', 'azure-pipelines.yaml': 'yaml',
-    '.drone.yml': 'yaml', 'bitbucket-pipelines.yml': 'yaml',
-    'appveyor.yml': 'yaml', '.appveyor.yml': 'yaml',
-    
-    # GitHub Actions
-    'action.yml': 'yaml', 'action.yaml': 'yaml',
-    
-    # Ansible
-    'playbook.yml': 'yaml', 'playbook.yaml': 'yaml',
-    'ansible.cfg': 'ini', 'hosts': 'ini', 'inventory': 'ini',
-    
-    # Database
-    '.sql': 'sql', '.psql': 'sql', '.mysql': 'sql',
-    '.prisma': 'prisma',
-    
-    # Docs & Text
-    '.md': 'markdown', '.markdown': 'markdown',
-    '.txt': 'text', '.rst': 'rst', '.adoc': 'asciidoc',
-    'README': 'markdown', 'CHANGELOG': 'markdown',
-    'LICENSE': 'text', 'CONTRIBUTING': 'markdown',
-    
-    # Build & Make
-    'makefile': 'makefile', 'Makefile': 'makefile',
-    'GNUmakefile': 'makefile', 'makefile.am': 'makefile',
-    
-    # Environment & Config
-    '.env': 'bash', '.env.example': 'bash', '.env.local': 'bash',
-    '.env.development': 'bash', '.env.production': 'bash',
-    '.env.test': 'bash', '.env.sample': 'bash',
-    '.envrc': 'bash', '.flaskenv': 'bash',
-    
-    # Git & VCS
-    '.gitignore': 'text', '.gitattributes': 'text', 
-    '.gitmodules': 'text', '.dockerignore': 'text',
-    '.npmignore': 'text', '.eslintignore': 'text',
-    
-    # Editor Config
-    '.editorconfig': 'ini', '.vimrc': 'vim', '.nvimrc': 'vim',
-    
-    # GraphQL & API
-    '.graphql': 'graphql', '.gql': 'graphql',
-    '.proto': 'protobuf', '.avro': 'json', '.thrift': 'thrift',
-    'openapi.yaml': 'yaml', 'openapi.yml': 'yaml',
-    'swagger.yaml': 'yaml', 'swagger.yml': 'yaml',
-}
+# Rough estimate for token calculation (4 chars ~= 1 token)
+CHARS_PER_TOKEN = 4
+MAX_FILE_SIZE_BYTES = 1_000_000  # 1 MB limit per file to prevent context flooding
+MAX_WORKERS = os.cpu_count() or 4
 
-ALWAYS_IGNORE_PATTERNS: Set[str] = {
-    # Version Control
-    '.git/', '.svn/', '.hg/', '.bzr/',
-    
-    # Dependencies
-    'node_modules/', 'bower_components/', 'jspm_packages/',
-    'vendor/', 'vendors/',
-    
-    # Build outputs
-    '.next/', '.nuxt/', '.output/', 'out/', 'dist/', 'build/',
-    'target/', '_site/', '.cache/', '.parcel-cache/',
-    '.swc/', '.turbo/', '.vercel/',
-    
-    # Python
-    '__pycache__/', '*.pyc', '*.pyo', '*.pyd', '.Python',
-    '.venv/', 'venv/', 'env/', 'ENV/', 'virtualenv/', '.pytest_cache/',
-    '.mypy_cache/', '.ruff_cache/', '.hypothesis/', '*.egg-info/',
-    '.tox/', '.coverage', 'htmlcov/', '.eggs/', '*.egg',
-    
-    # Java/JVM
-    '*.class', '*.jar', '*.war', '*.ear', 'hs_err_pid*',
-    
-    # Rust
-    'target/',
-    
-    # Go
-    'bin/', 'pkg/',
-    
-    # Ruby
-    '.bundle/',
-    
-    # IDEs
-    '.idea/', '.vscode/', '*.swp', '*.swo', '*~',
-    '.DS_Store', 'Thumbs.db', '.project', '.classpath',
-    '.settings/', '*.sublime-workspace', '*.sublime-project',
-    
-    # Logs & Databases
-    '*.log', '*.sqlite', '*.sqlite3', '*.db',
-    'npm-debug.log*', 'yarn-debug.log*', 'yarn-error.log*',
-    
-    # OS
-    '.DS_Store', 'Thumbs.db', 'desktop.ini',
-    
-    # Misc
-    '.env.local', '.env.*.local', '*.lock',
-    'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-    'composer.lock', 'Gemfile.lock', 'poetry.lock',
-    'public/', 'static/', 'assets/', 'media/', 'uploads/',
-}
+# Setup Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stderr)]
+)
+logger = logging.getLogger("DeepContext")
 
-# File categories for better organization
-FILE_CATEGORIES = {
-    'source': {'.py', '.js', '.ts', '.java', '.go', '.rs', '.rb', '.php', '.cpp', '.c', '.cs'},
-    'config': {'.json', '.yaml', '.yml', '.toml', '.ini', '.env', '.config'},
-    'docker': {'dockerfile', 'docker-compose.yml', 'docker-compose.yaml', '.dockerignore'},
-    'iac': {'.tf', '.tfvars', '.hcl'},
-    'ci_cd': {'.gitlab-ci.yml', 'Jenkinsfile', 'azure-pipelines.yml'},
-    'build': {'makefile', 'CMakeLists.txt', 'build.gradle', 'pom.xml'},
-    'docs': {'.md', '.rst', '.txt'},
-}
+class LanguageConfig:
+    """Static configuration for language detection and categorization."""
+    
+    EXTENSION_MAP: Dict[str, str] = {
+        # Python
+        '.py': 'python', '.pyi': 'python', '.pyx': 'python', '.ipynb': 'json',
+        # Web
+        '.js': 'javascript', '.jsx': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
+        '.html': 'html', '.css': 'css', '.scss': 'scss', '.vue': 'vue', '.svelte': 'svelte',
+        # JVM
+        '.java': 'java', '.kt': 'kotlin', '.scala': 'scala', '.gradle': 'groovy',
+        # Native
+        '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.hpp': 'cpp', '.rs': 'rust', '.go': 'go',
+        # Scripting
+        '.sh': 'bash', '.bash': 'bash', '.zsh': 'zsh', '.lua': 'lua', '.rb': 'ruby', '.php': 'php',
+        # Config/Data
+        '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml', '.xml': 'xml',
+        '.sql': 'sql', '.md': 'markdown', '.txt': 'text', 'Dockerfile': 'dockerfile',
+        '.tf': 'hcl'
+    }
+
+    IGNORE_PATTERNS: Set[str] = {
+        # SCM
+        '.git', '.svn', '.hg',
+        # Dependencies
+        'node_modules', 'venv', '.venv', 'env', 'dist', 'build', 'target',
+        '__pycache__', '.pytest_cache', '.mypy_cache', 'vendor',
+        # Media/Binary
+        '*.png', '*.jpg', '*.jpeg', '*.gif', '*.ico', '*.svg', '*.pdf',
+        '*.zip', '*.tar', '*.gz', '*.7z', '*.rar',
+        '*.exe', '*.dll', '*.so', '*.dylib', '*.class', '*.jar',
+        '*.db', '*.sqlite', '*.sqlite3', '*.pyc',
+        'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'Gemfile.lock'
+    }
+
+# -----------------------------------------------------------------------------
+# Data Structures
+# -----------------------------------------------------------------------------
 
 @dataclass
-class FileMetadata:
-    """Metadata for a single file"""
+class FileArtifact:
+    """Immutable representation of a processed file."""
     path: pathlib.Path
-    relative_path: pathlib.Path
+    relative_path: str
+    extension: str
     language: str
     size: int
     lines: int
-    modified: datetime
-    category: str
-    hash_md5: Optional[str] = None
+    content: str
+    token_estimate: int
+    is_truncated: bool
 
-# --- Performance Optimizations ---
+@dataclass
+class ProjectSummary:
+    """Aggregated statistics for the project."""
+    total_files: int
+    total_lines: int
+    total_tokens: int
+    file_tree: str
+    artifacts: List[FileArtifact]
 
-def get_file_category(file_path: pathlib.Path) -> str:
-    """Categorize file by its purpose"""
-    name_lower = file_path.name.lower()
-    suffix_lower = file_path.suffix.lower()
-    
-    for category, extensions in FILE_CATEGORIES.items():
-        if name_lower in extensions or suffix_lower in extensions:
-            return category
-    return 'other'
+# -----------------------------------------------------------------------------
+# Component: Project Scanner (Discovery)
+# -----------------------------------------------------------------------------
 
-def count_lines(file_path: pathlib.Path) -> int:
-    """Efficiently count lines in a file"""
-    try:
-        with open(file_path, 'rb') as f:
-            return sum(1 for _ in f)
-    except:
-        return 0
+class ProjectScanner:
+    """Responsible for file discovery and ignore logic."""
 
-def get_file_hash(file_path: pathlib.Path, hash_files: bool = False) -> Optional[str]:
-    """Get MD5 hash of file for verification"""
-    if not hash_files:
-        return None
-    try:
-        hash_md5 = hashlib.md5()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
-    except:
-        return None
+    def __init__(self, root_dir: pathlib.Path):
+        self.root_dir = root_dir.resolve()
+        self.git_ignore_spec = self._load_gitignore()
 
-def process_file(file_path: pathlib.Path, start_path: pathlib.Path, 
-                 include_hash: bool = False) -> Optional[FileMetadata]:
-    """Process a single file and extract metadata"""
-    try:
-        lang = get_language_from_path(file_path)
-        if lang is None:
-            return None
-            
-        stat = file_path.stat()
-        return FileMetadata(
-            path=file_path,
-            relative_path=file_path.relative_to(start_path),
-            language=lang or 'text',
-            size=stat.st_size,
-            lines=count_lines(file_path),
-            modified=datetime.fromtimestamp(stat.st_mtime),
-            category=get_file_category(file_path),
-            hash_md5=get_file_hash(file_path, include_hash)
-        )
-    except Exception as e:
-        print(f"Warning: Error processing {file_path}: {e}", file=sys.stderr)
-        return None
+    def _load_gitignore(self) -> pathspec.PathSpec:
+        """Loads .gitignore if present, otherwise returns empty spec."""
+        gitignore_path = self.root_dir / '.gitignore'
+        # Start with our default ignore patterns
+        patterns = list(LanguageConfig.IGNORE_PATTERNS)
+        
+        if gitignore_path.exists():
+            try:
+                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                    # Add lines from .gitignore
+                    patterns.extend(f.readlines())
+            except Exception as e:
+                logger.warning(f"Could not read .gitignore: {e}")
 
-def find_project_root(start_dir: pathlib.Path) -> pathlib.Path:
-    """Find the nearest parent directory containing .git or return start_dir."""
-    current = start_dir.resolve()
-    while True:
-        if (current / '.git').is_dir():
-            return current
-        parent = current.parent
-        if parent == current:
-            print("Warning: .git directory not found. Using starting directory as project root.", 
-                  file=sys.stderr)
-            return start_dir.resolve()
-        current = parent
+        return pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, patterns)
 
-def get_combined_spec(root_dir: pathlib.Path) -> pathspec.PathSpec:
-    """Combines ALWAYS_IGNORE_PATTERNS with patterns from .gitignore files."""
-    all_patterns = list(ALWAYS_IGNORE_PATTERNS)
-    gitignore_path = root_dir / '.gitignore'
-    if gitignore_path.is_file():
+    def should_ignore(self, file_path: pathlib.Path) -> bool:
+        """Check if a file matches global ignores or .gitignore."""
         try:
-            with open(gitignore_path, 'r', encoding='utf-8', errors='ignore') as f:
-                all_patterns.extend(f.readlines())
+            # pathspec requires relative paths for matching
+            rel_path = file_path.relative_to(self.root_dir).as_posix()
+            
+            # 1. Check base name against simple set (fast)
+            if file_path.name in LanguageConfig.IGNORE_PATTERNS:
+                return True
+            
+            # 2. Check against pathspec (handles globs like *.pyc or dir/file)
+            if self.git_ignore_spec.match_file(rel_path):
+                return True
+                
+            return False
+        except ValueError:
+            # If relative path cannot be computed, ignore it to be safe
+            return True
+
+    def scan(self) -> Generator[pathlib.Path, None, None]:
+        """Yields valid files from the directory."""
+        for root, dirs, files in os.walk(self.root_dir):
+            # Modify dirs in-place to prune traversal (optimization)
+            # We must check if the DIRECTORY itself is ignored
+            dirs[:] = [d for d in dirs if not self.should_ignore(pathlib.Path(root) / d)]
+            
+            for file in files:
+                path = pathlib.Path(root) / file
+                if not self.should_ignore(path):
+                    yield path
+
+    def generate_tree(self) -> str:
+        """Generates a visual tree structure for LLM context."""
+        tree_lines = []
+        
+        # Retrieve all valid paths first
+        paths = sorted(list(self.scan()), key=lambda p: str(p))
+        if not paths:
+            return "No files found."
+
+        # Convert to relative strings
+        rel_paths = [p.relative_to(self.root_dir) for p in paths]
+        
+        added_dirs = set()
+        
+        tree_lines.append(f"📂 {self.root_dir.name}/")
+        
+        for p in rel_paths:
+            parts = p.parts
+            depth = len(parts) - 1
+            
+            # Print directory structure leading to file
+            for i in range(depth):
+                parent_parts = parts[:i+1]
+                parent_path = pathlib.Path(*parent_parts)
+                if parent_path not in added_dirs:
+                    indent = "│   " * i
+                    tree_lines.append(f"{indent}├── {parent_parts[-1]}/")
+                    added_dirs.add(parent_path)
+            
+            # Print file
+            indent = "│   " * depth
+            tree_lines.append(f"{indent}├── {parts[-1]}")
+
+        return "\n".join(tree_lines)
+
+# -----------------------------------------------------------------------------
+# Component: File Processor (Extraction)
+# -----------------------------------------------------------------------------
+
+class FileProcessor:
+    """Responsible for reading and metadata extraction."""
+
+    @staticmethod
+    def process(path: pathlib.Path, root: pathlib.Path) -> Optional[FileArtifact]:
+        """Process a single file. Static method for ProcessPool serialization."""
+        try:
+            stat = path.stat()
+            if stat.st_size == 0:
+                return None
+
+            rel_path = path.relative_to(root).as_posix()
+            
+            # Language Detection
+            ext = path.suffix.lower()
+            name = path.name.lower()
+            lang = LanguageConfig.EXTENSION_MAP.get(ext, 'text')
+            if name == 'dockerfile': lang = 'dockerfile'
+            if name == 'makefile': lang = 'makefile'
+
+            # Content Reading with safeguards
+            content = ""
+            is_truncated = False
+            
+            if stat.st_size > MAX_FILE_SIZE_BYTES:
+                # For huge files, only read the tail (usually most recent logic/logs)
+                content = (f"<!-- WARNING: File too large ({stat.st_size} bytes). "
+                           f"Truncated to last 1000 lines for context. -->\n\n")
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        # Deque is more efficient for tails, but list slicing is fine here
+                        lines = f.readlines()
+                        content += "".join(lines[-1000:])
+                    is_truncated = True
+                except Exception:
+                    return None
+            else:
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                except UnicodeDecodeError:
+                    # Binary file detected during read
+                    return None
+
+            line_count = content.count('\n') + 1
+            token_est = len(content) // CHARS_PER_TOKEN
+
+            return FileArtifact(
+                path=path,
+                relative_path=rel_path,
+                extension=ext,
+                language=lang,
+                size=stat.st_size,
+                lines=line_count,
+                content=content,
+                token_estimate=token_est,
+                is_truncated=is_truncated
+            )
         except Exception as e:
-            print(f"Warning: Could not read .gitignore at {gitignore_path}: {e}", file=sys.stderr)
-    
-    return pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, all_patterns)
-
-def get_language_from_path(file_path: pathlib.Path) -> Optional[str]:
-    """Determines the language hint from the file path based on LANGUAGE_MAP."""
-    name_lower = file_path.name.lower()
-    
-    # Check exact name first (case-insensitive)
-    if name_lower in LANGUAGE_MAP:
-        return LANGUAGE_MAP[name_lower]
-    
-    # Check exact name (case-sensitive) for files like Makefile
-    if file_path.name in LANGUAGE_MAP:
-        return LANGUAGE_MAP[file_path.name]
-    
-    # Check by extension
-    if file_path.suffix.lower() in LANGUAGE_MAP:
-        return LANGUAGE_MAP[file_path.suffix.lower()]
-    
-    # Special handling for files in .github/workflows
-    if '.github' in file_path.parts and 'workflows' in file_path.parts:
-        if file_path.suffix in {'.yml', '.yaml'}:
-            return 'yaml'
-    
-    # Include files with no extension as plain text if they appear to be text
-    if not file_path.suffix:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                f.read(512)
-            return 'text'
-        except (UnicodeDecodeError, IOError):
+            logger.error(f"Error processing {path}: {e}")
             return None
-    
-    return None
 
-def collect_files(start_path: pathlib.Path, project_root: pathlib.Path, 
-                  combined_spec: pathspec.PathSpec, output_path: pathlib.Path,
-                  script_path: pathlib.Path) -> List[pathlib.Path]:
-    """Efficiently collect all files to process"""
-    files_to_process = []
-    
-    for root, dirs, files in os.walk(start_path, topdown=True):
-        root_path = pathlib.Path(root)
+# -----------------------------------------------------------------------------
+# Component: Report Generator (Output)
+# -----------------------------------------------------------------------------
+
+class ReportGenerator:
+    """Responsible for formatting the final Markdown output."""
+
+    @staticmethod
+    def generate(summary: ProjectSummary) -> str:
+        md = []
+        md.append(f"# 📦 Codebase Context: {os.path.basename(os.getcwd())}\n")
+        md.append(f"> Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                  f"Files: {summary.total_files} | "
+                  f"Tokens: ~{summary.total_tokens:,}\n")
         
-        # Prune ignored directories
-        for d in list(dirs):
-            dir_path = root_path / d
-            try:
-                relative_dir = dir_path.relative_to(project_root)
-                relative_dir_str = str(relative_dir).replace(os.sep, '/')
-                if combined_spec.match_file(relative_dir_str):
-                    dirs.remove(d)
-            except ValueError:
-                pass
+        md.append("\n## 🌲 Project Structure\n")
+        md.append("```text\n") # Added newline
+        md.append(summary.file_tree)
+        if not summary.file_tree.endswith('\n'):
+            md.append("\n")
+        md.append("```\n")
+
+        md.append("\n## 📄 File Contents\n")
         
-        for filename in files:
-            file_path = root_path / filename
-            
-            # Skip output and script
-            try:
-                if file_path.resolve() in (output_path.resolve(), script_path.resolve()):
-                    continue
-            except:
-                pass
-            
-            # Check against ignore patterns
-            try:
-                relative_file = file_path.relative_to(project_root)
-                relative_file_str = str(relative_file).replace(os.sep, '/')
-                if combined_spec.match_file(relative_file_str):
-                    continue
-            except ValueError:
-                pass
-            
-            # Check if file type is supported
-            if get_language_from_path(file_path) is not None:
-                files_to_process.append(file_path)
-    
-    return files_to_process
+        # Sort artifacts by path for consistent output
+        sorted_artifacts = sorted(summary.artifacts, key=lambda x: x.relative_path)
 
-def generate_metadata_table(files_metadata: List[FileMetadata]) -> str:
-    """Generate a markdown table with file metadata"""
-    table = "| File | Size | Lines | Type | Category | Last Modified |\n"
-    table += "|------|------|-------|------|----------|---------------|\n"
-    
-    for meta in sorted(files_metadata, key=lambda x: str(x.relative_path)):
-        size_str = format_size(meta.size)
-        modified_str = meta.modified.strftime("%Y-%m-%d %H:%M")
-        table += f"| `{meta.relative_path}` | {size_str} | {meta.lines} | {meta.language} | {meta.category} | {modified_str} |\n"
-    
-    return table
+        for artifact in sorted_artifacts:
+            md.append(f"\n### `{artifact.relative_path}`\n")
+            
+            meta_tags = []
+            if artifact.is_truncated: meta_tags.append("⚠️ TRUNCATED")
+            meta_info = f"Language: {artifact.language} | Lines: {artifact.lines} | Tokens: ~{artifact.token_estimate}"
+            if meta_tags:
+                meta_info += f" | {' '.join(meta_tags)}"
+            
+            md.append(f"_{meta_info}_\n")
+            
+            # Use fence with language for syntax highlighting
+            md.append(f"```{artifact.language}\n") # Added newline
+            md.append(artifact.content)
+            if not artifact.content.endswith('\n'):
+                md.append("\n")
+            md.append("```\n")
+            
+            md.append("---\n")
 
-def format_size(size_bytes: int) -> str:
-    """Format file size in human-readable format"""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} TB"
+        return "".join(md)
 
-def generate_statistics(files_metadata: List[FileMetadata]) -> str:
-    """Generate statistics summary"""
-    total_files = len(files_metadata)
-    total_lines = sum(m.lines for m in files_metadata)
-    total_size = sum(m.size for m in files_metadata)
-    
-    # Group by category
-    by_category = defaultdict(list)
-    for meta in files_metadata:
-        by_category[meta.category].append(meta)
-    
-    # Group by language
-    by_language = defaultdict(list)
-    for meta in files_metadata:
-        by_language[meta.language].append(meta)
-    
-    stats = f"## 📊 Statistics\n\n"
-    stats += f"- **Total Files:** {total_files}\n"
-    stats += f"- **Total Lines of Code:** {total_lines:,}\n"
-    stats += f"- **Total Size:** {format_size(total_size)}\n\n"
-    
-    stats += "### By Category\n\n"
-    for category, metas in sorted(by_category.items(), key=lambda x: len(x[1]), reverse=True):
-        count = len(metas)
-        lines = sum(m.lines for m in metas)
-        stats += f"- **{category}:** {count} files, {lines:,} lines\n"
-    
-    stats += "\n### By Language\n\n"
-    for language, metas in sorted(by_language.items(), key=lambda x: len(x[1]), reverse=True):
-        count = len(metas)
-        lines = sum(m.lines for m in metas)
-        stats += f"- **{language}:** {count} files, {lines:,} lines\n"
-    
-    return stats
-
-def create_markdown(target_dir: str, output_file: str, verbose: bool, 
-                    include_metadata_table: bool, include_hash: bool,
-                    max_workers: int):
-    """Generates the enhanced Markdown file."""
-    start_path = pathlib.Path(target_dir).resolve()
-    output_path = pathlib.Path(output_file).resolve()
-    
-    try:
-        script_path = pathlib.Path(__file__).resolve()
-    except NameError:
-        script_path = pathlib.Path.cwd() / "code_summarizer.py"
-    
-    if not start_path.is_dir():
-        print(f"Error: Directory not found: {target_dir}", file=sys.stderr)
-        sys.exit(1)
-    
-    project_root = find_project_root(start_path)
-    combined_spec = get_combined_spec(project_root)
-    
-    print(f"📂 Scanning directory: {start_path}")
-    print(f"🔍 Project root: {project_root}")
-    if (project_root / '.gitignore').exists():
-        print(f"✓ Using .gitignore from: {project_root / '.gitignore'}")
-    
-    # Collect files
-    print("📑 Collecting files...")
-    file_paths = collect_files(start_path, project_root, combined_spec, output_path, script_path)
-    print(f"✓ Found {len(file_paths)} files to process")
-    
-    # Process files with metadata
-    print("🔄 Processing files and extracting metadata...")
-    files_metadata: List[FileMetadata] = []
-    
-    with tqdm(total=len(file_paths), desc="Processing", unit="file") as pbar:
-        for file_path in file_paths:
-            meta = process_file(file_path, start_path, include_hash)
-            if meta:
-                files_metadata.append(meta)
-                if verbose:
-                    print(f"  ✓ {meta.relative_path} ({meta.lines} lines, {format_size(meta.size)})")
-            pbar.update(1)
-    
-    # Write markdown
-    print(f"📝 Writing to {output_path}...")
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as md_file:
-            # Header
-            md_file.write(f"# 📦 Code Summary: {start_path.name}\n\n")
-            md_file.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            md_file.write(f"**Source Directory:** `{start_path}`\n\n")
-            md_file.write("---\n\n")
-            
-            # Statistics
-            md_file.write(generate_statistics(files_metadata))
-            md_file.write("\n---\n\n")
-            
-            # Metadata table
-            if include_metadata_table:
-                md_file.write("## 📋 File Metadata\n\n")
-                md_file.write(generate_metadata_table(files_metadata))
-                md_file.write("\n---\n\n")
-            
-            # Table of Contents
-            md_file.write("## 📑 Table of Contents\n\n")
-            for meta in sorted(files_metadata, key=lambda x: str(x.relative_path)):
-                anchor = str(meta.relative_path).replace('/', '').replace('.', '').replace(' ', '-')
-                md_file.write(f"- [`{meta.relative_path}`](#{anchor})\n")
-            md_file.write("\n---\n\n")
-            
-            # File contents
-            md_file.write("## 📄 File Contents\n\n")
-            with tqdm(total=len(files_metadata), desc="Writing", unit="file") as pbar:
-                for meta in sorted(files_metadata, key=lambda x: str(x.relative_path)):
-                    try:
-                        with open(meta.path, 'r', encoding='utf-8', errors='ignore') as code_file:
-                            content = code_file.read()
-                        
-                        md_file.write(f"### File: `{meta.relative_path}`\n\n")
-                        md_file.write(f"**Language:** {meta.language} | ")
-                        md_file.write(f"**Size:** {format_size(meta.size)} | ")
-                        md_file.write(f"**Lines:** {meta.lines} | ")
-                        md_file.write(f"**Category:** {meta.category}\n\n")
-                        
-                        if meta.hash_md5:
-                            md_file.write(f"**MD5:** `{meta.hash_md5}`\n\n")
-                        
-                        md_file.write(f"```")
-                        md_file.write(content.strip() + "\n")
-                        md_file.write("```\n\n")
-                        md_file.write("---\n\n")
-                    except Exception as e:
-                        print(f"⚠ Warning: Could not read {meta.relative_path}: {e}", file=sys.stderr)
-                    
-                    pbar.update(1)
-        
-        print(f"\n✅ Success! Processed {len(files_metadata)} files")
-        print(f"📊 Total lines: {sum(m.lines for m in files_metadata):,}")
-        print(f"💾 Total size: {format_size(sum(m.size for m in files_metadata))}")
-        print(f"📄 Output: {output_path}")
-    
-    except IOError as e:
-        print(f"\n❌ Error: Could not write to {output_path}: {e}", file=sys.stderr)
-        sys.exit(1)
+# -----------------------------------------------------------------------------
+# Main Execution Controller
+# -----------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Create an enhanced Markdown summary of code files with rich metadata and Docker support.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("directory", help="The target directory to scan for code files.")
-    parser.add_argument("-o", "--output", default="code_summary.md", 
-                       help="The path for the output Markdown file.")
-    parser.add_argument("-v", "--verbose", action="store_true", 
-                       help="Show detailed processing information.")
-    parser.add_argument("--no-metadata-table", action="store_true",
-                       help="Skip generating the metadata table.")
-    parser.add_argument("--include-hash", action="store_true",
-                       help="Include MD5 hash for each file (slower).")
-    parser.add_argument("-j", "--jobs", type=int, default=4,
-                       help="Number of parallel workers (currently not used, reserved for future).")
-    
+    parser = argparse.ArgumentParser(description="Serialize codebase for LLM context.")
+    parser.add_argument("path", nargs="?", default=".", help="Root directory to scan")
+    parser.add_argument("-o", "--output", default="codebase_context.md", help="Output file path")
     args = parser.parse_args()
+
+    root_path = pathlib.Path(args.path).resolve()
+    output_path = pathlib.Path(args.output).resolve()
+
+    if not root_path.exists():
+        logger.error(f"Path does not exist: {root_path}")
+        sys.exit(1)
+
+    logger.info(f"🚀 Starting scan of: {root_path}")
     
-    create_markdown(
-        args.directory, 
-        args.output, 
-        args.verbose,
-        not args.no_metadata_table,
-        args.include_hash,
-        args.jobs
+    # 1. Scan & Tree Generation
+    scanner = ProjectScanner(root_path)
+    
+    # Generate the tree first (fast)
+    logger.info("Building directory tree...")
+    file_tree = scanner.generate_tree()
+    
+    # Collect files for processing
+    logger.info("Collecting files...")
+    files_to_process = list(scanner.scan())
+    
+    # Filter out the output file itself if it's inside the scan target
+    files_to_process = [f for f in files_to_process if f.resolve() != output_path]
+
+    logger.info(f"Found {len(files_to_process)} potential files.")
+
+    # 2. Parallel Processing
+    artifacts: List[FileArtifact] = []
+    
+    # Use ProcessPoolExecutor for CPU/IO mixed workload
+    if files_to_process:
+        print(f"Processing {len(files_to_process)} files using {MAX_WORKERS} workers...", file=sys.stderr)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Create futures mapping
+            future_to_file = {
+                executor.submit(FileProcessor.process, f, root_path): f 
+                for f in files_to_process
+            }
+            
+            # Process as they complete
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_file):
+                result = future.result()
+                if result:
+                    artifacts.append(result)
+                completed_count += 1
+                if completed_count % 10 == 0 or completed_count == len(files_to_process):
+                    # Simple text progress bar
+                    print(f"Progress: {completed_count}/{len(files_to_process)}", end='\r', file=sys.stderr)
+        print("", file=sys.stderr) # Clear progress line
+
+    # 3. Aggregation
+    summary = ProjectSummary(
+        total_files=len(artifacts),
+        total_lines=sum(a.lines for a in artifacts),
+        total_tokens=sum(a.token_estimate for a in artifacts),
+        file_tree=file_tree,
+        artifacts=artifacts
     )
 
+    # 4. Generation
+    report_content = ReportGenerator.generate(summary)
+
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        logger.info(f"✅ Success! Output written to: {output_path}")
+        logger.info(f"📊 Stats: {summary.total_files} files, {summary.total_lines} lines, ~{summary.total_tokens} tokens")
+    except IOError as e:
+        logger.error(f"Failed to write output: {e}")
+
 if __name__ == "__main__":
+    # Windows/MP support
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
