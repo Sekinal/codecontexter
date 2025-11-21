@@ -1,0 +1,14 @@
+[package]
+name = "codecontexter"
+version = "0.1.0"
+edition = "2024"
+description = "A simple codebase serializer for LLM Context Windows."
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = "0.4.42"
+clap = { version = "4.5.53", features = ["derive"] }
+ignore = "0.4.25"
+indicatif = "0.18.3"
+rayon = "1.11.0"
+serde = "1.0.228"
