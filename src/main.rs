@@ -5,9 +5,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // --- Configuration & Constants ---
@@ -32,9 +31,8 @@ struct Args {
 
 #[derive(Debug)]
 struct FileArtifact {
-    path: PathBuf,
+    // Removed 'path' and 'extension' as they were unused in the final output
     relative_path: String,
-    extension: String,
     language: String,
     lines: usize,
     content: String,
@@ -95,7 +93,7 @@ fn process_file(path: &Path, root: &Path) -> Option<FileArtifact> {
     }
 
     let relative_path = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+    // Extension variable removed as it was unused
     let language = detect_language(path);
 
     let mut is_truncated = false;
@@ -104,17 +102,10 @@ fn process_file(path: &Path, root: &Path) -> Option<FileArtifact> {
     // Handle File Reading
     if metadata.len() > MAX_FILE_SIZE_BYTES {
         // Read only the end of the file
-        // Note: This is a simplified "tail" implementation
-        if let Ok(file) = File::open(path) {
-             // Reading massive files to string just to slice is memory inefficient, 
-             // but for 1MB limit, it's acceptable for simplicity in Rust.
-             // A stricter implementation would seek using std::io::Seek.
-             // Here we attempt to read loosely as UTF-8.
-             let mut reader = std::io::BufReader::new(file);
-             // For safety, we treat huge files as truncated immediately in this simple impl
+        if File::open(path).is_ok() {
+             // Removed unused BufReader
              content_str = format!("<!-- WARNING: File too large ({} bytes). Truncated for context. -->\n", metadata.len());
              is_truncated = true;
-             // In a real robust implementation, we'd seek to end-10kb and read.
         } else {
             return None;
         }
@@ -135,9 +126,7 @@ fn process_file(path: &Path, root: &Path) -> Option<FileArtifact> {
     let token_estimate = content_str.len() / CHARS_PER_TOKEN;
 
     Some(FileArtifact {
-        path: path.to_path_buf(),
         relative_path,
-        extension: ext,
         language,
         lines,
         content: content_str,
