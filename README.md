@@ -116,7 +116,6 @@ fn main() {
 }
 ```
 ---
-```
 
 ## 🔒 Security & Redaction
 
