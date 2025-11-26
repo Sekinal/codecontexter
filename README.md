@@ -1,204 +1,145 @@
-# 🚀 codecontexter
+# 📦 CodeContexter
 
-> A high-performance codebase serializer that generates structured Markdown summaries optimized for LLM context windows. Written in Rust for speed and safety.
+**CodeContexter** is a lightning-fast, safety-first CLI tool written in Rust. It aggregates your entire codebase into a single, structured file (Markdown, JSON, or XML). 
 
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Crates.io](https://img.shields.io/crates/v/clap.svg)](https://crates.io/crates/clap)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+It is designed specifically for **providing context to Large Language Models (LLMs)** like ChatGPT, Claude, and GitHub Copilot without manual copy-pasting.
 
-## ✨ Features
+![Rust](https://img.shields.io/badge/built_with-Rust-orange)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-- **🔍 Smart Discovery**: Automatically respects `.gitignore` patterns using the robust `ignore` crate
-- **🌲 Visual Trees**: Generates clean ASCII directory trees for easy navigation
-- **⚡ Parallel Processing**: Multi-core file processing powered by Rayon for maximum performance
-- **📏 Token Estimation**: Calculates approximate token counts to help manage context limits
-- **🛡️ Safe Handling**: Automatically truncates large files (>1MB) and skips binary files
-- **📝 Rich Markdown**: Syntax-highlighted code blocks with per-file metadata
-- **🎯 LLM-Optimized**: Structured format designed specifically for AI assistant contexts
-- **📊 Progress Tracking**: Real-time progress bars with `indicatif` for large codebases
+## 🚀 Why CodeContexter?
 
-## 📦 Installation
+When working with LLMs, you often need to share multiple files to explain a problem. Copying them one by one is tedious and prone to missing context. 
+
+CodeContexter:
+1.  **Walks your directory** (respecting `.gitignore`).
+2.  **Generates a visual tree** of your project structure.
+3.  **Aggregates file contents** into a single formatted output.
+4.  **Redacts secrets** automatically to keep your keys safe.
+
+## ✨ Key Features
+
+-   **⚡ High Performance:** Parallel processing (Rayon) and streaming output for low memory usage on huge repos.
+-   **🛡️ Security First:** Automatically detects and redacts private keys, API tokens, and secrets before they leave your machine.
+-   **🧠 Smart Filtering:** Respects `.gitignore`, skips binary files, ignores whitespace-only files, and prevents symlink loops.
+-   **📏 Large File Handling:** Smartly truncates files over 1MB (shows the first and last 50 lines) to preserve token limits while keeping context.
+-   **📋 Clipboard Ready:** Optional flag to copy the output directly to your clipboard.
+-   **🎨 Multiple Formats:** Output to **Markdown** (default), **JSON**, or **XML**.
+
+## 🛠️ Installation
 
 ### From Source
-
-Ensure you have Rust 1.70+ and Cargo installed.
+Ensure you have Rust and Cargo installed.
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/yourusername/codecontexter.git
 cd codecontexter
 
-# Build the release binary
-cargo build --release
-
-# The binary will be available at ./target/release/codecontexter
+# Install locally
+cargo install --path .
 ```
 
-### Run Directly with Cargo
+## 📖 Usage
+
+Navigate to your project root and run:
 
 ```bash
-# Run without building separately
-cargo run --release -- /path/to/your/project
+codecontexter
 ```
 
-## 🎯 Quick Start
+This generates a `codebase_context.md` file in the current directory.
 
-### Basic Usage
+### Common Options
 
-Generate a markdown summary of your current directory:
-
+**Copy directly to clipboard:**
 ```bash
-./target/release/codecontexter
+codecontexter --clipboard
 ```
 
-### Custom Output
-
-Specify a different output file:
-
+**Change output format (Markdown, JSON, XML):**
+*Note: Use `-t` for format (type).*
 ```bash
-./target/release/codecontexter /path/to/your/project -o my_context.md
+codecontexter -t json --output context.json
 ```
 
-### Enable Verbose Logging
-
+**Exclude specific patterns:**
 ```bash
-./target/release/codecontexter --verbose /path/to/project
+codecontexter --exclude "*.lock" --exclude "tests/*"
 ```
 
-### Command Options
-
+**Point to a specific directory:**
 ```bash
-./target/release/codecontexter --help
+codecontexter ./src/my_component
 ```
 
-Output:
-```
-Serialize codebase for LLM context
-
+### Full Help
+```text
 Usage: codecontexter [OPTIONS] [PATH]
 
 Arguments:
   [PATH]  Root directory to scan [default: .]
 
 Options:
-  -o, --output <OUTPUT>  Output file path [default: codebase_context.md]
-  -v, --verbose Show verbose logging
-  -h, --help Print help
-  -V, --version Print version
+  -o, --output <OUTPUT>    Output file path [default: codebase_context.md]
+  -t, --format <FORMAT>    Output format [default: markdown] [possible values: markdown, json, xml]
+  -c, --clipboard          Copy result to clipboard
+  -e, --exclude <EXCLUDE>  Exclude file patterns (glob), e.g. --exclude "*.log"
+  -f, --force              Force overwrite of output file if it exists
+  -v, --verbose            Show verbose logging
+  -h, --help               Print help
+  -V, --version            Print version
 ```
 
-## 📊 Example Output
+## 📄 Output Example (Markdown)
 
-Running `./target/release/codecontexter .` generates a `codebase_context.md` file with:
+The generated file looks like this, optimized for LLM prompting:
 
 ```markdown
 # 📦 Codebase Context: my-project
-> Generated on 2025-11-21 00:27:06 | Files: 42 | Tokens: ~15,230
+> Generated on 2023-10-27 | Files: 12 | Tokens: ~4500
 
 ## 🌲 Project Structure
-```text
 📂 my-project/
+├── Cargo.toml
 ├── src/
-│   └── main.rs
-└── tests/
-    └── test_main.rs
-```
+│   ├── main.rs
+│   ├── utils.rs
 
 ## 📄 File Contents
 
-###`src/main.rs`
-_Language: rust | Lines: 280 | Tokens: ~2,335_
-
+### `src/main.rs`
+_Language: rust | Lines: 150 | Tokens: ~800_
 ```rust
-use anyhow::Result;
-use clap::Parser;
-
-fn main() -> Result<()> {
-    println!("Hello, Rust!");
-    Ok(())
+fn main() {
+    println!("Hello, world!");
 }
 ```
-
 ---
 ```
 
-## 🔧 Configuration
+## 🔒 Security & Redaction
 
-### Language Support
+CodeContexter includes a built-in sanitizer that scans file contents for sensitive patterns before writing to the output. It looks for and redacts:
 
-The serializer automatically detects and highlights:
-- **Systems**: Rust, C, C++, Go
-- **Web**: JavaScript, TypeScript, HTML, CSS
-- **JVM**: Java, Kotlin
-- **Scripting**: Python, Bash, Lua, Ruby, PHP
-- **Config**: JSON, YAML, TOML, XML, SQL
-- **Docs**: Markdown, Dockerfiles, and more
+*   RSA/DSA Private Keys
+*   AWS Access Keys (`AKIA...`)
+*   OpenAI/Stripe Keys (`sk-...`)
+*   GitHub Personal Access Tokens
+*   Generic "API Key" / "Secret" string assignments
 
-### Ignore Patterns
+*Note: While this feature catches common secrets, always review your output before sharing it with third-party AI services.*
 
-The scanner automatically ignores:
-- **Version control**: `.git`, `.svn`, `.hg`
-- **Dependencies**: `node_modules`, `target/`, `vendor/`, `__pycache__`
-- **Build artifacts**: `dist/`, `build/`, `*.class`, `*.jar`
-- **Binary files**: `*.png`, `*.pdf`, `*.zip`, `*.exe`, `*.so`, `*.dll`
-- **Lock files**: `package-lock.json`, `Cargo.lock`, `uv.lock`
+## 🤝 Contributing
 
-**Custom patterns can be added to your `.gitignore` file— they will be respected automatically.**
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-### File Size Limits
+1.  Fork the repo
+2.  Create your feature branch (`git checkout -b feature/amazing-feature`)
+3.  Commit your changes (`git commit -m 'Add some amazing feature'`)
+4.  Push to the branch (`git push origin feature/amazing-feature`)
+5.  Open a Pull Request
 
-- **Default limit**: 1MB per file
-- Large files are truncated with a warning comment
-- Binary files are automatically skipped using content detection
+## 📜 License
 
-## 🏗️ Project Structure
-
-```
-codecontexter/
-├── Cargo.toml # Rust project configuration
-├── Cargo.lock # Dependency lock file
-├── README.md # This file
-├── .gitignore # Git ignore patterns
-└── src/
-    └── main.rs # Main application (~280 lines)
-```
-
-## 🛠️ Development
-
-### Requirements
-
-- Rust 1.70+ (or nightly for edition 2024)
-- Cargo package manager
-
-### Key Dependencies
-
-- **[clap](https://docs.rs/clap)** - Derive-based CLI argument parsing
-- **[ignore](https://docs.rs/ignore)** - Fast `.gitignore` application
-- **[rayon](https://docs.rs/rayon)** - Data parallelism for concurrent file processing
-- **[indicatif](https://docs.rs/indicatif)** - Progress bars and spinners
-- **[anyhow](https://docs.rs/anyhow)** - Ergonomic error handling
-- **[chrono](https://docs.rs/chrono)** - Date and time utilities
-
-### Building and Testing
-
-```bash
-# Format code
-cargo fmt
-
-# Run linter
-cargo clippy -- -D warnings
-
-# Run debug build
-cargo run -- /path/to/test/project
-
-# Create release build
-cargo build --release
-```
-
-## 📝 License
-
-MIT
-
----
-
-**Pro Tip**: Run this tool before asking an AI assistant for help with your codebase to provide complete context! The parallel processing makes it blazing fast even on large monorepos.
+Distributed under the MIT License.
