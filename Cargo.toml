@@ -1,7 +1,7 @@
 [package]
 name = "codecontexter"
-version = "0.1.0"
-edition = "2024"
+version = "0.1.1"
+edition = "2025"
 description = "A simple codebase serializer for LLM Context Windows."
 
 [dependencies]
